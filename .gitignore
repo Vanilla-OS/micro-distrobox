@@ -1,0 +1,3 @@
+/debian/.debhelper
+/debian/micro-distrobox
+/debian/micro-distrobox*.debhelper
