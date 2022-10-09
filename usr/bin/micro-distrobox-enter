@@ -1,0 +1,501 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-3.0-only
+#
+# This file is part of the distrobox project:
+#    https://github.com/89luca89/distrobox
+#
+# Copyright (C) 2021 distrobox contributors
+#
+# distrobox is free software; you can redistribute it and/or modify it
+# under the terms of the GNU General Public License version 3
+# as published by the Free Software Foundation.
+#
+# distrobox is distributed in the hope that it will be useful, but
+# WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
+# General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with distrobox; if not, see <http://www.gnu.org/licenses/>.
+
+# POSIX
+# Expected env variables:
+#	HOME
+#	USER
+# Optional env variables:
+#	DBX_CONTAINER_MANAGER
+#	DBX_CONTAINER_NAME
+#	DBX_SKIP_WORKDIR
+#	DBX_SUDO_PROGRAM
+
+trap '[ "$?" -ne 0 ] && printf "\nAn error occurred\n" && rm -f $HOME/.cache/.*.fifo $HOME/.cache/.*.status' EXIT
+
+# Dont' run this command as sudo.
+if [ "$(id -u)" -eq 0 ]; then
+	printf >&2 "Running %s as sudo is not supported.\n" "$(basename "${0}")"
+	printf >&2 " try instead running:\n"
+	printf >&2 "	%s --root %s\n" "$(basename "${0}")" "$*"
+	exit 1
+fi
+
+# Defaults
+container_command=""
+container_image=""
+container_image_default="registry.fedoraproject.org/fedora-toolbox:36"
+container_manager="autodetect"
+container_name="my-distrobox"
+container_manager_additional_flags=""
+non_interactive=0
+distrobox_sudo_program="sudo"
+
+# Use cd + dirname + pwd so that we do not have relative paths in mount points
+# We're not using "realpath" here so that symlinks are not resolved this way
+# "realpath" would break situations like Nix or similar symlink based package
+# management.
+distrobox_enter_path="$(cd "$(dirname "$0")" && pwd)/distrobox-enter"
+dryrun=0
+headless=0
+rootful=0
+skip_workdir=0
+verbose=0
+version="1.4.1"
+
+# Source configuration files, this is done in an hierarchy so local files have
+# priority over system defaults
+# leave priority to environment variables.
+config_files="
+	/usr/share/distrobox/distrobox.conf
+	/usr/etc/distrobox/distrobox.conf
+	/etc/distrobox/distrobox.conf
+	${XDG_CONFIG_HOME:-"${HOME}/.config"}/distrobox/distrobox.conf
+	${HOME}/.distroboxrc
+"
+for config_file in ${config_files}; do
+	# Shellcheck will give error for sourcing a variable file as it cannot follow
+	# it. We don't care so let's disable this linting for now.
+	# shellcheck disable=SC1090
+	[ -e "${config_file}" ] && . "${config_file}"
+done
+# Fixup non_interactive=[true|false], in case we find it in the config file(s)
+[ "${non_interactive}" = "true" ] && non_interactive=1
+[ "${non_interactive}" = "false" ] && non_interactive=0
+
+[ -n "${DBX_CONTAINER_IMAGE}" ] && container_image="${DBX_CONTAINER_IMAGE}"
+[ -n "${DBX_CONTAINER_MANAGER}" ] && container_manager="${DBX_CONTAINER_MANAGER}"
+[ -n "${DBX_CONTAINER_NAME}" ] && container_name="${DBX_CONTAINER_NAME}"
+[ -n "${DBX_SKIP_WORKDIR}" ] && skip_workdir="${DBX_SKIP_WORKDIR}"
+[ -n "${DBX_NON_INTERACTIVE}" ] && non_interactive="${DBX_NON_INTERACTIVE}"
+[ -n "${DBX_SUDO_PROGRAM}" ] && distrobox_sudo_program="${DBX_SUDO_PROGRAM}"
+
+# Print usage to stdout.
+# Arguments:
+#   None
+# Outputs:
+#   print usage with examples.
+show_help() {
+	cat << EOF
+distrobox version: ${version}
+
+Usage:
+
+	distrobox-enter --name fedora-35 -- bash -l
+	distrobox-enter my-alpine-container -- sh -l
+	distrobox-enter --additional-flags "--preserve-fds" --name test -- bash -l
+	distrobox-enter --additional-flags "--env MY_VAR=value" --name test -- bash -l
+	MY_VAR=value distrobox-enter --additional-flags "--preserve-fds" --name test -- bash -l
+
+Options:
+
+	--name/-n:		name for the distrobox						default: my-distrobox
+	--/-e:			end arguments execute the rest as command to execute at login	default: bash -l
+	--no-tty/-T:		do not instantiate a tty
+	--no-workdir/-nw:		always start the container from container's home directory
+	--additional-flags/-a:	additional flags to pass to the container manager command
+	--help/-h:		show this message
+	--root/-r:		launch podman/docker with root privileges. Note that if you need root this is the preferred
+				way over "sudo distrobox" (note: if using a program other than 'sudo' for root privileges is necessary,
+				specify it through the DBX_SUDO_PROGRAM env variable, or 'distrobox_sudo_program' config variable)
+	--dry-run/-d:		only print the container manager command generated
+	--verbose/-v:		show more verbosity
+	--version/-V:		show version
+EOF
+}
+
+# Parse arguments
+while :; do
+	case $1 in
+		-h | --help)
+			# Call a "show_help" function to display a synopsis, then exit.
+			show_help
+			exit 0
+			;;
+		-v | --verbose)
+			shift
+			verbose=1
+			;;
+		-T | -H | --no-tty)
+			shift
+			headless=1
+			;;
+		-r | --root)
+			shift
+			rootful=1
+			;;
+		-V | --version)
+			printf "distrobox: %s\n" "${version}"
+			exit 0
+			;;
+		-d | --dry-run)
+			shift
+			dryrun=1
+			;;
+		-nw | --no-workdir)
+			shift
+			skip_workdir=1
+			;;
+		-n | --name)
+			if [ -n "$2" ]; then
+				container_name="$2"
+				shift
+				shift
+			fi
+			;;
+		-a | --additional-flags)
+			if [ -n "$2" ]; then
+				container_manager_additional_flags="${container_manager_additional_flags} ${2}"
+				shift
+				shift
+			fi
+			;;
+		-Y | --yes)
+			non_interactive=1
+			shift
+			;;
+		-e | --exec | --)
+			shift
+			container_command=$*
+			break
+			;;
+		-*) # Invalid options.
+			printf >&2 "ERROR: Invalid flag '%s'\n\n" "$1"
+			show_help
+			exit 1
+			;;
+		*) # Default case: If no more options then break out of the loop.
+			# If we have a flagless option and container_name is not specified
+			# then let's accept argument as container_name
+			if [ -n "$1" ]; then
+				container_name="$1"
+				shift
+			else
+				break
+			fi
+			;;
+	esac
+done
+
+set -o errexit
+set -o nounset
+# set verbosity
+if [ "${verbose}" -ne 0 ]; then
+	set -o xtrace
+fi
+
+# We depend on a container manager let's be sure we have it
+# First we use podman, else docker
+case "${container_manager}" in
+	autodetect)
+		if command -v podman > /dev/null; then
+			container_manager="podman"
+		elif command -v docker > /dev/null; then
+			container_manager="docker"
+		fi
+		;;
+	podman)
+		container_manager="podman"
+		;;
+	docker)
+		container_manager="docker"
+		;;
+	*)
+		printf >&2 "Invalid input %s.\n" "${container_manager}"
+		printf >&2 "The available choices are: 'autodetect', 'podman', 'docker'\n"
+		;;
+esac
+
+# Be sure we have a container manager to work with.
+if ! command -v "${container_manager}" > /dev/null && [ "${dryrun}" -eq 0 ]; then
+	# Error: we need at least one between docker or podman.
+	printf >&2 "Missing dependency: we need a container manager.\n"
+	printf >&2 "Please install one of podman or docker.\n"
+	printf >&2 "You can follow the documentation on:\n"
+	printf >&2 "\tman distrobox-compatibility\n"
+	printf >&2 "or:\n"
+	printf >&2 "\thttps://github.com/89luca89/distrobox/blob/main/docs/compatibility.md\n"
+	exit 127
+fi
+
+# add  verbose if -v is specified
+if [ "${verbose}" -ne 0 ]; then
+	container_manager="${container_manager} --log-level debug"
+fi
+
+# prepend sudo (or the specified sudo program) if we want podman or docker to be rootful
+if [ "${rootful}" -ne 0 ]; then
+	container_manager="${distrobox_sudo_program} ${container_manager}"
+fi
+
+# Generate Podman or Docker command to execute.
+# Arguments:
+#   None
+# Outputs:
+#   prints the podman or docker command to enter the distrobox container
+generate_command() {
+	result_command="${container_manager} exec"
+	result_command="${result_command}
+		--interactive
+		--user=\"${USER}\""
+
+	# For some usage, like use in service, or launched by non-terminal
+	# eg. from desktop files, TTY can fail to instantiate, and fail to enter
+	# the container.
+	# To work around this, --headless let's you skip the --tty flag and make it
+	# work in tty-less situations.
+	# Disable tty also if we're NOT in a tty (test -t 0).
+	if [ "${headless}" -eq 0 ] && [ -t 0 ]; then
+		result_command="${result_command}
+			--tty"
+	fi
+
+	# Entering container using our user and workdir.
+	# Start container from working directory. Else default to home. Else do /.
+	# Since we are entering from host, drop at workdir through '/run/host'
+	# which represents host's root inside container. Any directory on host
+	# even if not explicitly mounted is bound to exist under /run/host.
+	# Since user $HOME is very likely present in container, enter there directly
+	# to avoid confusing the user about shifted paths.
+	# pass distrobox-enter path, it will be used in the distrobox-export tool.
+	if [ "${skip_workdir}" -eq 0 ]; then
+		workdir="$(echo "${PWD:-${container_home:-"/"}}" | sed -e 's/"/\\\"/g')"
+		if [ -n "${workdir##*"${container_home}"*}" ]; then
+			workdir="/run/host${workdir}"
+		fi
+	else
+		# Skipping workdir we just enter $HOME of the container.
+		workdir="${container_home}"
+	fi
+	result_command="${result_command}
+		--workdir=\"${workdir}\"
+		--env \"DISTROBOX_ENTER_PATH=${distrobox_enter_path}\""
+	# Loop through all the environment vars
+	# and export them to the container.
+	set +o xtrace
+	# disable logging fot this snippet, or it will be too talkative.
+	for i in $(printenv | grep '=' | grep -Ev ' |"|`|\$' |
+		grep -Ev '^(HOST|HOSTNAME|HOME|PATH|SHELL|XDG_.*_DIRS|^_)'); do
+		# We filter the environment so that we do not have strange variables,
+		# multiline or containing spaces.
+		# We also NEED to ignore the HOME variable, as this is set at create time
+		# and needs to stay that way to use custom home dirs.
+		result_command="${result_command} --env \"${i}\""
+	done
+
+	# Start with the $PATH set in the container's config
+	container_paths="${container_path:-""}"
+	# Ensure the standard FHS program paths are in PATH environment
+	standard_paths="/usr/local/sbin /usr/local/bin /usr/sbin /usr/bin /sbin /bin"
+	# add to the PATH after the existing paths, and only if not already present
+	for standard_path in ${standard_paths}; do
+		if [ -n "${container_paths##*:"${standard_path}"*}" ]; then
+			container_paths="${container_paths}:${standard_path}"
+		fi
+	done
+	# Ensure the $PATH entries from the host are appended as well
+	for standard_path in $(echo "${PATH}" | tr ':' ' '); do
+		if [ -n "${container_paths##*:"${standard_path}"*}" ]; then
+			container_paths="${container_paths}:${standard_path}"
+		fi
+	done
+	result_command="${result_command} --env \"PATH=${container_paths}\""
+
+	# Ensure the standard FHS program paths are in XDG_DATA_DIRS environment
+	standard_paths="/usr/local/share /usr/share"
+	container_paths="${XDG_DATA_DIRS:=}"
+	# add to the XDG_DATA_DIRS only after the host's paths, and only if not already present.
+	for standard_path in ${standard_paths}; do
+		if [ -n "${container_paths##*:"${standard_path}"*}" ]; then
+			container_paths="${container_paths}:${standard_path}"
+		fi
+	done
+	result_command="${result_command} --env \"XDG_DATA_DIRS=${container_paths}\""
+
+	# Ensure the standard FHS program paths are in XDG_CONFIG_DIRS environment
+	standard_paths="/etc/xdg"
+	container_paths="${XDG_CONFIG_DIRS:=}"
+	# add to the XDG_CONFIG_DIRS only after the host's paths, and only if not already present.
+	for standard_path in ${standard_paths}; do
+		if [ -n "${container_paths##*:"${standard_path}"*}" ]; then
+			container_paths="${container_paths}:${standard_path}"
+		fi
+	done
+	result_command="${result_command} --env \"XDG_CONFIG_DIRS=${container_paths}\""
+
+	# re-enable logging if it was enabled previously.
+	if [ "${verbose}" -ne 0 ]; then
+		set -o xtrace
+	fi
+
+	# Add additional flags
+	result_command="${result_command} ${container_manager_additional_flags}"
+
+	# Run selected container with specified command.
+	result_command="${result_command} ${container_name}"
+
+	if [ -n "${container_command}" ]; then
+		result_command="${result_command} ${container_command}"
+	else
+		# if no command was specified, let's execute a command that will find
+		# and run the default shell for the user
+		result_command="${result_command} sh -c \"\\\$(getent passwd ${USER} | cut -f 7 -d :) -l"\"
+	fi
+
+	# Return generated command.
+	printf "%s" "${result_command}"
+}
+
+container_home="${HOME}"
+container_path="${PATH}"
+# dry run mode, just generate the command and print it. No execution.
+if [ "${dryrun}" -ne 0 ]; then
+	cmd="$(generate_command)"
+	cmd="$(echo "${cmd}" | tr '[:blank:]\n' ' ' | tr -s ' ')"
+	printf "%s\n" "${cmd}"
+	exit 0
+fi
+
+# Now inspect the container we're working with.
+container_status="unknown"
+eval "$(${container_manager} inspect --type container "${container_name}" --format \
+	'container_status={{.State.Status}};
+	{{range .Config.Env}}{{if slice . 0 5 | eq "HOME="}}container_home={{slice . 5 | printf "%q"}};{{end}}{{end}}
+	{{range .Config.Env}}{{if slice . 0 5 | eq "PATH="}}container_path={{slice . 5 | printf "%q"}}{{end}}{{end}}')"
+
+# Check if the container is even there
+if [ "${container_status}" = "unknown" ]; then
+	# If not, prompt to create it first
+	printf >&2 "Cannot find container %s\n" "${container_name}"
+	if [ -z "${container_image}" ]; then
+		container_image="${container_image_default}"
+	fi
+	# If we're not-interactive, just don't ask questions
+	if [ "${non_interactive}" -eq 1 ]; then
+		response="yes"
+	else
+		printf >&2 "Create it now, out of image %s? [Y/n]: " "${container_image}"
+		read -r response
+		response="${response:-"Y"}"
+	fi
+
+	# Accept only y,Y,Yes,yes,n,N,No,no.
+	case "${response}" in
+		y | Y | Yes | yes | YES)
+			# Ok, let's create the container with just 'distrobox create $container_name
+			create_command="$(dirname "${0}")/distrobox-create"
+			if [ "${rootful}" -ne 0 ]; then
+				create_command="${create_command} --root"
+			fi
+			create_command="${create_command} -i ${container_image} -n ${container_name}"
+			printf >&2 "Creating the container with command:\n"
+			printf >&2 "  %s\n" "${create_command}"
+			if [ "${dryrun}" -ne 1 ]; then
+				eval "${create_command}"
+			fi
+			;;
+		n | N | No | no | NO)
+			printf >&2 "Ok. For creating it, run this command:\n"
+			printf >&2 "\tdistrobox create <name-of-container> --image <remote>/<docker>:<tag>\n"
+			exit 0
+			;;
+		*) # Default case: If no more options then break out of the loop.
+			printf >&2 "Invalid input.\n"
+			printf >&2 "The available choices are: y,Y,Yes,yes,YES or n,N,No,no,NO.\nExiting.\n"
+			exit 1
+			;;
+	esac
+fi
+
+# If the container is not already running, we need to start if first
+if [ "${container_status}" != "running" ]; then
+	# If container is not running, start it first
+	# Here, we save the timestamp before launching the start command, so we can
+	# be sure we're working with this very same session of logs later.
+
+	printf >&2 "Container %s is not running.\n" "${container_name}"
+	printf >&2 "Starting container %s\n" "${container_name}"
+	printf >&2 "run this command to follow along:\n\n"
+	printf >&2 " %s logs -f %s\n\n" "${container_manager}" "${container_name}"
+
+	log_timestamp="$(date +%FT%T.%N%:z)"
+	${container_manager} start "${container_name}" > /dev/null
+	# Check if the container is going in error status earlier than the
+	# entrypoint
+	if [ "$(${container_manager} inspect \
+		--type container "${container_name}" \
+		--format "{{.State.Status}}")" != "running" ]; then
+
+		printf >&2 "\033[31m Error: could not start entrypoint.\n\033[0m"
+		container_manager_log="$(${container_manager} logs \
+			--since "${log_timestamp}" "${container_name}")"
+		printf >&2 "%s\n" "${container_manager_log}"
+		exit 1
+	fi
+
+	printf >&2 "%-40s\t" " Starting container..."
+	mkdir -p "${HOME}/.cache/"
+	touch "${HOME}/.cache/.${container_name}.fifo"
+	touch "${HOME}/.cache/.${container_name}.status"
+	while true; do
+		# save starting loop timestamp in temp variable, we'll use it
+		# after to let logs command minimize possible holes
+		log_timestamp_new="$(date +%FT%T.%N%:z)"
+		${container_manager} logs \
+			--since "${log_timestamp}" "${container_name}" 2> /dev/null > "${HOME}/.cache/.${container_name}.fifo"
+		# read logs from log_timestamp to now, line by line
+		while IFS= read -r line; do
+			case "${line}" in
+				*"Error:"*)
+					printf >&2 "\033[31m %s\n\033[0m" "${line}"
+					exit 1
+					;;
+				*"Warning:"*)
+					printf >&2 "\n\033[33m %s\033[0m" "${line}"
+					;;
+				*"distrobox:"*)
+					current_line="$(echo "${line}" | cut -d':' -f2-)"
+					# Save current line in the status, to avoid printing the same line multiple times
+					if ! grep -q "${current_line}" "${HOME}/.cache/.${container_name}.status"; then
+						printf >&2 "\033[32m [ OK ]\n\033[0m%-40s\t" "${current_line}"
+						printf "%s\n" "${current_line}" > "${HOME}/.cache/.${container_name}.status"
+					fi
+					;;
+				*"container_setup_done"*)
+					printf >&2 "\033[32m [ OK ]\n\033[0m"
+					break 2
+					;;
+				*) ;;
+			esac
+		done < "${HOME}/.cache/.${container_name}.fifo"
+
+		# Register new timestamp where to start logs from.
+		log_timestamp="${log_timestamp_new}"
+	done
+	# cleanup fifo
+	rm -f "${HOME}/.cache/.${container_name}.fifo"
+	rm -f "${HOME}/.cache/.${container_name}.status"
+	printf >&2 "\nContainer Setup Complete!\n"
+fi
+
+# Generate the exec command and run it
+cmd="$(generate_command)"
+# shellcheck disable=SC2086
+eval ${cmd}

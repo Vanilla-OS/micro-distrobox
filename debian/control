@@ -1,0 +1,23 @@
+Source: micro-distrobox
+Section: admin
+Priority: optional
+Maintainer: Mirko Brombin <send@mirko.pm>
+Build-Depends:
+ debhelper-compat (= 13),
+Standards-Version: 4.6.1
+Homepage: https://distrobox.privatedns.org/
+Vcs-Browser: https://github.com/vanilla-os/micro-distrobox
+Vcs-Git: https://github.com/vanilla-os/micro-distrobox.git
+Rules-Requires-Root: no
+
+Package: micro-distrobox
+Architecture: all
+Depends:
+ podman | docker.io,
+ ${misc:Depends},
+Description: Another tool for containerized command line environments on Linux
+ Use any linux distribution inside your terminal. Distrobox uses podman or
+ docker to create containers using the linux distribution of your choice.
+ Created container will be tightly integrated with the host, allowing to share
+ the HOME directory of the user, external storage, external usb devices and
+ graphical apps (X11/Wayland) and audio.

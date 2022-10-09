@@ -1,0 +1,294 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-3.0-only
+#
+# This file is part of the distrobox project:
+#    https://github.com/89luca89/distrobox
+#
+# Copyright (C) 2021 distrobox contributors
+#
+# distrobox is free software; you can redistribute it and/or modify it
+# under the terms of the GNU General Public License version 3
+# as published by the Free Software Foundation.
+#
+# distrobox is distributed in the hope that it will be useful, but
+# WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
+# General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with distrobox; if not, see <http://www.gnu.org/licenses/>.
+
+# POSIX
+trap '[ "$?" -ne 0 ] && printf "\nAn error occurred\n"' EXIT
+
+all=0
+container_manager="autodetect"
+container_name="my-distrobox"
+delete=0
+icon="auto"
+icon_default="/usr/share/icons/terminal-distrobox-icon.png"
+verbose=0
+version="1.4.1"
+
+# Source configuration files, this is done in an hierarchy so local files have
+# priority over system defaults
+# leave priority to environment variables.
+config_files="
+	/usr/share/distrobox/distrobox.conf
+	/usr/etc/distrobox/distrobox.conf
+	/etc/distrobox/distrobox.conf
+	${XDG_CONFIG_HOME:-"${HOME}/.config"}/distrobox/distrobox.conf
+	${HOME}/.distroboxrc
+"
+for config_file in ${config_files}; do
+	# Shellcheck will give error for sourcing a variable file as it cannot follow
+	# it. We don't care so let's disable this linting for now.
+	# shellcheck disable=SC1090
+	[ -e "${config_file}" ] && . "${config_file}"
+done
+[ -n "${DBX_CONTAINER_MANAGER}" ] && container_manager="${DBX_CONTAINER_MANAGER}"
+[ -n "${DBX_CONTAINER_NAME}" ] && container_name="${DBX_CONTAINER_NAME}"
+
+# Print usage to stdout.
+# Arguments:
+#   None
+# Outputs:
+#   print usage with examples.
+show_help() {
+	cat << EOF
+distrobox version: ${version}
+
+Usage:
+
+	distrobox-generate-entry container-name [--delete] [--icon [auto,/path/to/icon]]
+
+Options:
+
+	--help/-h:		show this message
+	--all/-a:		perform for all distroboxes
+	--delete/-d:		delete the entry
+	--icon/-i:		specify a custom icon [/path/to/icon] (default auto)
+	--verbose/-v:		show more verbosity
+	--version/-V:		show version
+EOF
+}
+
+if [ $# -eq 0 ]; then
+	show_help
+	exit
+fi
+
+# Parse arguments
+while :; do
+	case $1 in
+		-h | --help)
+			# Call a "show_help" function to display a synopsis, then exit.
+			show_help
+			exit 0
+			;;
+		-v | --verbose)
+			verbose=1
+			shift
+			;;
+		-V | --version)
+			printf "distrobox: %s\n" "${version}"
+			exit 0
+			;;
+		-d | --delete)
+			delete=1
+			shift
+			;;
+		-a | --all)
+			all=1
+			shift
+			;;
+		-i | --icon)
+			if [ -n "$2" ]; then
+				icon="$2"
+				shift
+				shift
+			fi
+			;;
+		--) # End of all options.
+			shift
+			break
+			;;
+		-*) # Invalid options.
+			printf >&2 "ERROR: Invalid flag '%s'\n\n" "$1"
+			show_help
+			exit 1
+			;;
+		*) # Default case: If no more options then break out of the loop.
+			# If we have a flagless option and container_name is not specified
+			# then let's accept argument as container_name
+			if [ -n "$1" ]; then
+				container_name="$1"
+				shift
+			else
+				break
+			fi
+			;;
+	esac
+done
+
+set -o errexit
+set -o nounset
+# set verbosity
+if [ "${verbose}" -ne 0 ]; then
+	set -o xtrace
+fi
+
+if [ -z "${container_name}" ]; then
+	printf >&2 "Please specify the name of the container.\n"
+	exit 1
+fi
+
+if [ "${all}" -ne 0 ]; then
+	container_names="$(distrobox list --no-color | tail -n +2 | cut -d'|' -f2 | tr -d ' ')"
+	for container_name in ${container_names}; do
+		if [ "${delete}" -ne 0 ]; then
+			"${0}" "${container_name}" --delete
+			continue
+		fi
+		"${0}" "${container_name}"
+	done
+	exit
+fi
+
+# If we delete, just ask confirmation and exit.
+if [ "${delete}" -ne 0 ]; then
+	rm -f "${HOME}/.local/share/applications/${container_name}.desktop"
+	printf "%s\n" "${container_name}"
+	exit
+fi
+
+if  ! command -v curl > /dev/null && ! command -v wget > /dev/null; then
+	printf >&2 "Icon generation depends on either curl or wget\n"
+	printf >&2 "Fallbacking to default icon.\n"
+	download="null"
+fi
+
+if  command -v curl > /dev/null 2>&1; then
+	download="curl -sLo"
+elif  command -v wget > /dev/null 2>&1; then
+	download="wget -qO"
+fi
+
+# We depend on a container manager let's be sure we have it
+# First we use podman, else docker
+case "${container_manager}" in
+	autodetect)
+		if command -v podman > /dev/null; then
+			container_manager="podman"
+			container_manager_cp_command="podman cp"
+		elif command -v docker > /dev/null; then
+			container_manager="docker"
+			container_manager_cp_command="docker cp -L"
+		fi
+		;;
+	podman)
+		container_manager="podman"
+		container_manager_cp_command="podman cp"
+		;;
+	docker)
+		container_manager="docker"
+		container_manager_cp_command="docker cp -L"
+		;;
+	*)
+		printf >&2 "Invalid input %s.\n" "${container_manager}"
+		printf >&2 "The available choices are: 'autodetect', 'podman', 'docker'\n"
+		;;
+esac
+
+# Be sure we have a container manager to work with.
+if ! command -v "${container_manager}" > /dev/null; then
+	# Error: we need at least one between docker or podman.
+	printf >&2 "Missing dependency: we need a container manager.\n"
+	printf >&2 "Please install one of podman or docker.\n"
+	printf >&2 "You can follow the documentation on:\n"
+	printf >&2 "\tman distrobox-compatibility\n"
+	printf >&2 "or:\n"
+	printf >&2 "\thttps://github.com/89luca89/distrobox/blob/main/docs/compatibility.md\n"
+	exit 127
+fi
+
+# add  verbose if -v is specified
+if [ "${verbose}" -ne 0 ]; then
+	container_manager="${container_manager} --log-level debug"
+fi
+
+if ! ${container_manager} inspect --type container "${container_name}" > /dev/null; then
+	printf >&2 "Cannot find container %s. Please create it first.\n" "${container_name}"
+	exit 1
+fi
+
+# Ensure the destination dir exists.
+mkdir -p "${HOME}/.local/share/applications"
+mkdir -p "${HOME}/.local/share/icons/distrobox"
+
+distrobox_path="$(dirname "$(realpath "${0}")")"
+entry_name="$(echo "${container_name}" | cut -c1 | tr "[:lower:]" "[:upper:]")$(echo "${container_name}" | cut -c2-)"
+
+if [ "${icon}" = "auto" ]; then
+	# Set icon to the generic terminal as a fallback.
+	icon="${icon_default}"
+	# This is a NON comprehensive list of logos of the most popular distirbutions. If you find logos for
+	# other supported distros, add it here.
+	DISTRO_ICON_MAP="
+		alma:https://upload.wikimedia.org/wikipedia/commons/e/ec/AlmaLinux_Icon_Logo.png
+		alpine:https://d1q6f0aelx0por.cloudfront.net/product-logos/library-alpine-logo.png
+		arch:https://upload.wikimedia.org/wikipedia/commons/thumb/b/bb/Archlogo900.png/640px-Archlogo900.png
+		centos:https://upload.wikimedia.org/wikipedia/commons/6/63/CentOS_color_logo.svg
+		clear--os:https://d1q6f0aelx0por.cloudfront.net/product-logos/library-clearlinux-logo.png
+		debian:https://free-astro.org/images/0/04/Debian_logo.png
+		fedora:https://upload.wikimedia.org/wikipedia/commons/4/41/Fedora_icon_%282021%29.svg
+		gentoo:https://upload.wikimedia.org/wikipedia/commons/e/e2/Logo-gentoo.png
+		opensuse-leap:https://en.opensuse.org/images/4/44/Button-filled-colour.png
+		opensuse-tumbleweed:https://en.opensuse.org/images/4/44/Button-filled-colour.png
+		rhel:https://avatars.githubusercontent.com/u/12718395?.png
+		rocky:https://raw.githubusercontent.com/rocky-linux/rocky-logos/r9/pixmaps/fedora-logo-sprite.png
+		slackware:https://distrowatch.com/images/yvzhuwbpy/slackware.png
+		ubuntu:https://upload.wikimedia.org/wikipedia/commons/a/ab/Logo-ubuntu_cof-orange-hex.svg
+		void:https://voidlinux.org/assets/img/void_bg.png
+	"
+	# Try to detect container's distribution by using /etc/os-release
+	${container_manager_cp_command} "${container_name}":/etc/os-release /tmp/"${container_name}".os-release
+	container_distro="$(grep "^ID=" /tmp/"${container_name}".os-release |
+		cut -d'=' -f2- |
+		sed "s|linux||g" |
+		tr -d ' ' |
+		tr -d '"')"
+	rm -f /tmp/"${container_name}".os-release
+
+	icon_url="$(echo "${DISTRO_ICON_MAP}" | grep "${container_distro}:" | cut -d':' -f2-)"
+	if [ -n "${icon_url}" ] && [ "${download}" != "null" ]; then
+		icon_extension="${icon_url##*.}"
+
+		if ${download} - "${icon_url}" > "${HOME}/.local/share/icons/distrobox/${container_distro}.${icon_extension}"; then
+			icon="${HOME}/.local/share/icons/distrobox/${container_distro}.${icon_extension}"
+		else
+			# Wget failed for some reasons. Default to generic terminal icon as declared at the beginning.
+			printf >&2 "Warning: Failed to download icon. Defaulting to generic one.\n"
+		fi
+	else
+		# Distribution not found in the list. Default to generic terminal icon as declared at the beginning.
+		printf >&2 "Warning: Distribution not found in default icon set. Defaulting to generic one.\n"
+	fi
+fi
+
+cat << EOF > "${HOME}/.local/share/applications/${container_name}.desktop"
+[Desktop Entry]
+Name=${entry_name}
+GenericName=Terminal entering ${entry_name}
+Comment=Terminal entering ${entry_name}
+Category=Distrobox;System;Utility"
+Exec=${distrobox_path}/distrobox enter ${container_name}
+Icon=${icon}
+Keywords=distrobox;
+NoDisplay=false
+Terminal=true
+TryExec=${distrobox_path}/distrobox
+Type=Application
+EOF
+
+printf "%s\n" "${container_name}"
