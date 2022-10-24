@@ -26,7 +26,7 @@ container_manager="autodetect"
 container_name="my-distrobox"
 delete=0
 icon="auto"
-icon_default="/usr/share/icons/terminal-distrobox-icon.png"
+icon_default="${HOME}/.local/share/icons/terminal-distrobox-icon.png"
 verbose=0
 version="1.4.1"
 

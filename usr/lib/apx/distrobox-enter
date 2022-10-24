@@ -173,7 +173,23 @@ while :; do
 			;;
 		-e | --exec | --)
 			shift
-			container_command=$*
+			# container_command=$*
+			container_command="$1"
+			shift
+			for arg in "$@"; do
+				if echo "${arg}" | grep -Eq "'|\""; then
+					container_command="${container_command} \
+						$(echo "${arg}" | sed 's|\\|\\\\|g' |
+						sed 's| |\\ |g' |
+						sed 's|\$|\\\$|g' |
+						sed "s|'|\\\'|g" |
+						sed 's|"|\\\"|g')"
+				elif echo "${arg}" | grep -q "'"; then
+					container_command="${container_command} \"${arg}\""
+				else
+					container_command="${container_command} '${arg}'"
+				fi
+			done
 			break
 			;;
 		-*) # Invalid options.
@@ -286,6 +302,7 @@ generate_command() {
 	fi
 	result_command="${result_command}
 		--workdir=\"${workdir}\"
+		--env \"CONTAINER_ID=${container_name}\"
 		--env \"DISTROBOX_ENTER_PATH=${distrobox_enter_path}\""
 	# Loop through all the environment vars
 	# and export them to the container.

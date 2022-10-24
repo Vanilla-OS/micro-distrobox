@@ -22,8 +22,6 @@
 set -o errexit
 set -o nounset
 
-trap '[ "$?" -ne 0 ] && printf "\nAn error occurred\n"' EXIT
-
 version="1.4.1"
 
 # Print usage to stdout.
@@ -89,10 +87,6 @@ case "${distrobox_command}" in
 		exit 0
 		;;
 	help | --help | -h)
-		if command -v man > /dev/null; then
-			man distrobox || show_help
-			exit 0
-		fi
 		show_help
 		exit 0
 		;;

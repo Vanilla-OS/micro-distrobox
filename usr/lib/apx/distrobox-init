@@ -180,7 +180,7 @@ mount_bind() (
 	! [ -d "${source_dir}" ] && ! [ -f "${source_dir}" ] && return 0
 
 	# if target_dir exists, check if it is a mountpoint and umount it.
-	if [ -e "${target_dir}" ] && mountpoint "${target_dir}"; then
+	if [ -e "${target_dir}" ] && findmnt "${target_dir}" > /dev/null; then
 		umount "${target_dir}"
 	fi
 	# if the source_dir exists, then create the target_dir
@@ -252,7 +252,6 @@ if [ "${upgrade}" -ne 0 ] || ! command -v find || ! command -v mount || ! comman
 		# fall back to bash, and we set the SHELL variable to bash so
 		# that it is set up correctly for the user.
 		if ! apk add "${shell_pkg}"; then
-			SHELL="/bin/bash"
 			shell_pkg="bash"
 		fi
 		apk add \
@@ -297,7 +296,6 @@ if [ "${upgrade}" -ne 0 ] || ! command -v find || ! command -v mount || ! comman
 		# fall back to bash, and we set the SHELL variable to bash so
 		# that it is set up correctly for the user.
 		if ! apt-get install -y "${shell_pkg}"; then
-			SHELL="/bin/bash"
 			shell_pkg="bash"
 		fi
 		apt-get install -y \
@@ -349,7 +347,6 @@ if [ "${upgrade}" -ne 0 ] || ! command -v find || ! command -v mount || ! comman
 		# fall back to bash, and we set the SHELL variable to bash so
 		# that it is set up correctly for the user.
 		if ! dnf install -y "${shell_pkg}"; then
-			SHELL="/bin/bash"
 			shell_pkg="bash"
 		fi
 		dnf install -y --allowerasing \
@@ -382,28 +379,39 @@ if [ "${upgrade}" -ne 0 ] || ! command -v find || ! command -v mount || ! comman
 		fi
 
 	elif command -v emerge; then
+		# Check if the container we are using has a ::gentoo repo defined,
+		# if it is defined and it is empty, then synchroznize it.
+		gentoo_repo="$(portageq get_repo_path / gentoo)"
+		if [ -n "${gentoo_repo}" ] && [ ! -e "${gentoo_repo}" ]; then
+			emerge-webrsync
+		fi
+		# If we need to upgrade, do it and exit, no further action required.
+		if [ "${upgrade}" -ne 0 ]; then
+			emerge --sync
+			exit
+		fi
 		# Check if shell_pkg is available in distro's repo. If not we
 		# fall back to bash, and we set the SHELL variable to bash so
 		# that it is set up correctly for the user.
-		if ! emerge --ask=n --autounmask-continue "${shell_pkg}"; then
-			SHELL="/bin/bash"
+		if ! emerge --ask=n --autounmask-continue --noreplace --quiet-build "${shell_pkg}"; then
 			shell_pkg="bash"
 		fi
-		emerge --ask=n --autounmask-continue --quiet-build \
+		emerge --ask=n --autounmask-continue --noreplace --quiet-build \
 			"${shell_pkg}" \
+			app-crypt/gnupg \
 			bc \
-			net-misc/curl \
 			diffutils \
 			findutils \
 			less \
 			ncurses \
+			net-misc/curl \
 			pinentry \
 			procps \
 			shadow \
 			sudo \
+			sys-process/lsof \
 			util-linux \
-			wget \
-			vte
+			wget
 
 	elif command -v microdnf; then
 		# If we need to upgrade, do it and exit, no further action required.
@@ -415,7 +423,6 @@ if [ "${upgrade}" -ne 0 ] || ! command -v find || ! command -v mount || ! comman
 		# fall back to bash, and we set the SHELL variable to bash so
 		# that it is set up correctly for the user.
 		if ! microdnf install -y "${shell_pkg}"; then
-			SHELL="/bin/bash"
 			shell_pkg="bash"
 		fi
 		microdnf install -y \
@@ -462,7 +469,6 @@ if [ "${upgrade}" -ne 0 ] || ! command -v find || ! command -v mount || ! comman
 		# that it is set up correctly for the user.
 		pacman --noconfirm -Syyu
 		if ! pacman -Sy --noconfirm "${shell_pkg}"; then
-			SHELL="/bin/bash"
 			shell_pkg="bash"
 		fi
 		pacman -Sy --noconfirm \
@@ -502,7 +508,6 @@ if [ "${upgrade}" -ne 0 ] || ! command -v find || ! command -v mount || ! comman
 		# fall back to bash, and we set the SHELL variable to bash so
 		# that it is set up correctly for the user.
 		if ! yes | slackpkg install -default_answer=yes -batch=yes "${shell_pkg}"; then
-			SHELL="/bin/bash"
 			shell_pkg="bash"
 		fi
 		yes | slackpkg install -default_answer=yes -batch=yes \
@@ -558,11 +563,13 @@ if [ "${upgrade}" -ne 0 ] || ! command -v find || ! command -v mount || ! comman
 		fi
 		# Ensure we avoid errors by keeping xbps updated
 		xbps-install -Syu xbps
+		# We have to lock this package, as it's incompatible with distrobox's
+		# mount process.
+		xbps-pkgdb -m repolock base-files
 		# Check if shell_pkg is available in distro's repo. If not we
 		# fall back to bash, and we set the SHELL variable to bash so
 		# that it is set up correctly for the user.
 		if ! xbps-install -Sy "${shell_pkg}"; then
-			SHELL="/bin/bash"
 			shell_pkg="bash"
 		fi
 		xbps-install -Sy \
@@ -600,7 +607,6 @@ if [ "${upgrade}" -ne 0 ] || ! command -v find || ! command -v mount || ! comman
 		# fall back to bash, and we set the SHELL variable to bash so
 		# that it is set up correctly for the user.
 		if ! yum install -y "${shell_pkg}"; then
-			SHELL="/bin/bash"
 			shell_pkg="bash"
 		fi
 		yum install -y \
@@ -637,7 +643,6 @@ if [ "${upgrade}" -ne 0 ] || ! command -v find || ! command -v mount || ! comman
 			exit
 		fi
 		if ! zypper install -y "${shell_pkg}"; then
-			SHELL="/bin/bash"
 			shell_pkg="bash"
 		fi
 		zypper install -y \
@@ -686,6 +691,13 @@ if [ "${upgrade}" -ne 0 ] || ! command -v find || ! command -v mount || ! comman
 		printf "Error: could not set up base dependencies.\n"
 		# Exit as command not found
 		exit 127
+	fi
+	# Ash shell is an exception, it is not a standalone package, but part of busybox.
+	# for this reason, use this quirk to adjust the package name.
+	if [ "${shell_pkg}" = "ash" ]; then
+		SHELL="/bin/sh"
+	else
+		SHELL="$(command -v "${shell_pkg}")"
 	fi
 fi
 ###############################################################################
@@ -843,7 +855,7 @@ if [ -d "/etc/dpkg/dpkg.cfg.d/" ]; then
 		printf "distrobox: Setting up apt hooks...\n"
 		printf "" > /etc/apt/apt.conf.d/00_distrobox
 		for init_mount in ${HOST_MOUNTS_RO_INIT}; do
-			printf 'DPkg::Pre-Invoke {"if mountpoint %s; then umount %s; fi";};\n' \
+			printf 'DPkg::Pre-Invoke {"if findmnt %s >/dev/null; then umount %s; fi";};\n' \
 				"${init_mount}" "${init_mount}" >> /etc/apt/apt.conf.d/00_distrobox
 			printf 'DPkg::Post-Invoke {"if [ -e /run/host/%s ]; then mount --rbind /run/host/%s %s; fi";};\n' \
 				"${init_mount}" "${init_mount}" "${init_mount}" >> /etc/apt/apt.conf.d/00_distrobox
@@ -863,7 +875,7 @@ if [ -d "/usr/share/libalpm/scripts" ]; then
 	printf "#!/bin/sh\n" > /usr/share/libalpm/scripts/02_distrobox_post_hook.sh
 	chmod +x /usr/share/libalpm/scripts/*distrobox*.sh
 	for net_mount in ${HOST_MOUNTS_RO}; do
-		printf "if mountpoint %s; then umount %s; fi\n" \
+		printf "if findmnt %s >/dev/null; then umount %s; fi\n" \
 			"${net_mount}" "${net_mount}" >> /usr/share/libalpm/scripts/00_distrobox_pre_hook.sh
 		printf "if [ -e /run/host/%s ]; then mount --rbind -o ro /run/host/%s %s; fi\n" \
 			"${net_mount}" "${net_mount}" "${net_mount}" >> /usr/share/libalpm/scripts/02_distrobox_post_hook.sh
@@ -902,7 +914,7 @@ if ! grep -q 'Defaults !fqdn' /etc/sudoers.d/sudoers; then
 	printf "Defaults !fqdn\n" >> /etc/sudoers.d/sudoers
 fi
 # Ensure passwordless sudo is set up for user
-if ! grep -q "${container_user_name} ALL = (root) NOPASSWD:ALL" /etc/sudoers.d/sudoers; then
+if ! grep -q "\"${container_user_name}\" ALL = (root) NOPASSWD:ALL" /etc/sudoers.d/sudoers; then
 	printf "\"%s\" ALL = (root) NOPASSWD:ALL\n" "${container_user_name}" >> /etc/sudoers.d/sudoers
 fi
 
@@ -919,7 +931,10 @@ fi
 printf "distrobox: Setting up users...\n"
 
 # Setup kerberos integration with the host
-if [ -d "/etc/krb5.conf.d" ] && [ ! -e "/etc/krb5.conf.d/kcm_default_ccache" ]; then
+if [ -d "/run/host/var/kerberos" ] &&
+	[ -d "/etc/krb5.conf.d" ] &&
+	[ ! -e "/etc/krb5.conf.d/kcm_default_ccache" ]; then
+
 	cat << EOF > "/etc/krb5.conf.d/kcm_default_ccache"
 # # To disable the KCM credential cache, comment out the following lines.
 [libdefaults]
@@ -1032,7 +1047,7 @@ if [ "${init}" -eq 0 ]; then
 					# We only do this, if the file is a bind mount in the first place.
 					# This could be useful for init-hooks that involve umounting those
 					# files so that can be separated from the host.
-					mountpoint "${file_watch}" &&
+					findmnt "${file_watch}" > /dev/null &&
 						umount "${file_watch}" &&
 						mount_bind "/run/host${file_watch}" "${file_watch}" rw
 				fi
@@ -1048,7 +1063,7 @@ printf  "distrobox: Setting up init system...\n"
 # the init system. If they're mounts, there might
 # be problems. Let's unmount them.
 for host_mount in  ${HOST_MOUNTS_RO_INIT}; do
-	if mountpoint "${host_mount}"; then umount "${host_mount}"; fi
+	if findmnt "${host_mount}" > /dev/null; then umount "${host_mount}"; fi
 done
 if command -v systemctl 2> /dev/null; then
 	# Cleanup systemd to not interfere with the host
