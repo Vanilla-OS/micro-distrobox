@@ -14,6 +14,7 @@ Package: micro-distrobox
 Architecture: all
 Depends:
  podman | docker.io,
+ uidmap,
  ${misc:Depends},
 Description: Another tool for containerized command line environments on Linux
  Use any linux distribution inside your terminal. Distrobox uses podman or
