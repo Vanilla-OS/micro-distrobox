@@ -32,7 +32,7 @@ init_hook=""
 upgrade=0
 pre_init_hook=""
 verbose=0
-version="1.4.1"
+version="1.4.2.1"
 # Print usage to stdout.
 # Arguments:
 #   None
@@ -120,9 +120,9 @@ while :; do
 		--pre-init-hooks)
 			if [ -n "$2" ]; then
 				pre_init_hook="$2"
-				shift
-				shift
 			fi
+			shift
+			shift
 			;;
 		--)
 			shift
@@ -399,7 +399,7 @@ if [ "${upgrade}" -ne 0 ] || ! command -v find || ! command -v mount || ! comman
 		emerge --ask=n --autounmask-continue --noreplace --quiet-build \
 			"${shell_pkg}" \
 			app-crypt/gnupg \
-			bc \
+			sys-devel/bc \
 			diffutils \
 			findutils \
 			less \
@@ -663,7 +663,8 @@ if [ "${upgrade}" -ne 0 ] || ! command -v find || ! command -v mount || ! comman
 			systemd \
 			time \
 			wget \
-			util-linux
+			util-linux \
+			util-linux-systemd
 
 		# These are graphics drivers for 3d applications
 		zypper install -y \
@@ -769,11 +770,13 @@ printf "distrobox: Setting up host's sockets integration...\n"
 # for example using `podman --remote` to control the host's podman from inside
 # the container or accessing docker and libvirt sockets.
 host_sockets="$(find /run/host/run -name 'user' \
+	-prune -o -path /run/host/run/media \
 	-prune -o -name 'nscd' \
 	-prune -o -name 'bees' \
 	-prune -o -name 'system_bus_socket' \
 	-prune -o -type s -print \
 	2> /dev/null || :)"
+
 # we're excluding system dbus socket and nscd socket here. Including them will
 # create many problems with package managers thinking they have access to
 # system dbus or user auth cache misused.
@@ -964,7 +967,9 @@ if ! grep -q "^$(printf '%s' "${container_user_name}" | tr '\\' '.'):" /etc/pass
 			"${container_user_home}" "${SHELL:-"/bin/bash"}" >> /etc/passwd
 		printf "%s::1::::::" "${container_user_name}" >> /etc/shadow
 	fi
-else
+# Ensure we're not using the specified SHELL. Run it only once, so that future
+# user's preferences are not overwritten at each start.
+elif [ ! -e /etc/passwd.done ]; then
 	# This situation is presented when podman or docker already creates the user
 	# for us inside container. We should modify the user's prepopulated shadowfile
 	# entry though as per user's active preferences.
@@ -977,6 +982,7 @@ else
 
 		printf "Warning: there was a problem setting up the user\n"
 	fi
+	touch /etc/passwd.done
 fi
 
 # We generate a random password to initialize the entry for the user and root.
@@ -1067,8 +1073,8 @@ for host_mount in  ${HOST_MOUNTS_RO_INIT}; do
 done
 if command -v systemctl 2> /dev/null; then
 	# Cleanup systemd to not interfere with the host
+	# /etc/systemd/system/*.wants/
 	UNIT_TARGETS="
-		/etc/systemd/system/*.wants/*
 		/usr/lib/systemd/system/basic.target.wants/*
 		/usr/lib/systemd/system/local-fs.target.wants/*
 		/usr/lib/systemd/system/multi-user.target.wants/*
@@ -1076,9 +1082,15 @@ if command -v systemctl 2> /dev/null; then
 		/usr/lib/systemd/system/sockets.target.wants/*initctl*
 		/usr/lib/systemd/system/sockets.target.wants/*udev*
 		/usr/lib/systemd/system/sysinit.target.wants/*
+		/usr/lib/systemd/system/systemd-tmpfiles*
 		/usr/lib/systemd/system/systemd-update-utmp*
+		/usr/lib/systemd/system/NetworkManager-wait-online.service
+		/usr/lib/systemd/system/auditd.service
+		/usr/lib/systemd/system/libstoragemgmt.service
+		/usr/lib/systemd/system/mcelog.service
 	"
-	for unit in $(find "${UNIT_TARGETS}" 2> /dev/null | grep -v systemd-tmpfiles-setup); do
+	# shellcheck disable=SC2086,SC2044
+	for unit in $(find ${UNIT_TARGETS} 2> /dev/null); do
 		systemctl mask "$(basename "${unit}")"
 	done
 fi

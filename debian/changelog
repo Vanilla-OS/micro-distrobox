@@ -1,5 +1,5 @@
-micro-distrobox (1.4.1-9) kinetic; urgency=low
+micro-distrobox (1.4.2.1) kinetic; urgency=low
 
   * Update with upstream changes
 
- -- Mirko Brombin <send@mirko.pm>  Mon, 01 Aug 2022 12:35:14 -0500
+ -- Mirko Brombin <send@mirko.pm>  Mon, 02 Jan 2023 11:48:14 -0500

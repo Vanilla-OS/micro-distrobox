@@ -29,11 +29,9 @@
 #	DBX_CONTAINER_IMAGE
 #	DBX_CONTAINER_MANAGER
 #	DBX_CONTAINER_NAME
-#	DBX_CONTAINER_ENTRY
+#	DBX_CONTAINER_GENERATE_ENTRY
 #	DBX_NON_INTERACTIVE
 #	DBX_SUDO_PROGRAM
-
-trap '[ "$?" -ne 0 ] && printf "\nAn error occurred\n"' EXIT
 
 # Dont' run this command as sudo.
 if [ "$(id -u)" -eq 0 ]; then
@@ -49,10 +47,11 @@ container_clone=""
 container_home_prefix=""
 container_image=""
 container_image_default="registry.fedoraproject.org/fedora-toolbox:36"
+container_name_default="my-distrobox"
 container_init_hook=""
 container_manager="autodetect"
 container_manager_additional_flags=""
-container_entry=1
+container_generate_entry=1
 container_name=""
 container_pre_init_hook=""
 container_user_custom_home=""
@@ -78,7 +77,7 @@ distrobox_hostexec_path="$(cd "$(dirname "${0}")" && pwd)/distrobox-host-exec"
 [ ! -e "${distrobox_hostexec_path}" ] && distrobox_hostexec_path="$(command -v distrobox-hostexec)"
 rootful=0
 verbose=0
-version="1.4.1"
+version="1.4.2.1"
 
 # Source configuration files, this is done in an hierarchy so local files have
 # priority over system defaults
@@ -106,7 +105,7 @@ done
 [ -n "${DBX_CONTAINER_IMAGE}" ] && container_image="${DBX_CONTAINER_IMAGE}"
 [ -n "${DBX_CONTAINER_MANAGER}" ] && container_manager="${DBX_CONTAINER_MANAGER}"
 [ -n "${DBX_CONTAINER_NAME}" ] && container_name="${DBX_CONTAINER_NAME}"
-[ -n "${DBX_CONTAINER_ENTRY}" ] && container_entry="${DBX_CONTAINER_ENTRY}"
+[ -n "${DBX_container_generate_entry}" ] && container_generate_entry="${DBX_container_generate_entry}"
 [ -n "${DBX_NON_INTERACTIVE}" ] && non_interactive="${DBX_NON_INTERACTIVE}"
 [ -n "${DBX_SUDO_PROGRAM}" ] && distrobox_sudo_program="${DBX_SUDO_PROGRAM}"
 
@@ -134,8 +133,8 @@ Usage:
 
 Options:
 
-	--image/-i:		image to use for the container	default: registry.fedoraproject.org/fedora-toolbox:36
-	--name/-n:		name for the distrobox		default: my-distrobox
+	--image/-i:		image to use for the container	default: ${container_image_default}
+	--name/-n:		name for the distrobox		default: ${container_name_default}
 	--pull/-p:		pull the image even if it exists locally (implies --yes)
 	--yes/-Y:		non-interactive, pull images without asking
 	--root/-r:		launch podman/docker with root privileges. Note that if you need root this is the preferred
@@ -151,6 +150,7 @@ Options:
 	--pre-init-hooks:	additional commands to execute prior to container initialization
 	--init/-I:		use init system (like systemd) inside the container.
 				this will make host's processes not visible from within the container.
+	--compatibility/-C:	show list of compatible images
 	--help/-h:		show this message
 	--no-entry:		do not generate a container entry in the application list
 	--dry-run/-d:		only print the container manager command generated
@@ -161,8 +161,40 @@ Compatibility:
 
 	for a list of compatible images and container managers, please consult the man page:
 		man distrobox-compatibility
+	or run
+		distrobox create --compatibility
 	or consult the documentation page on: https://github.com/89luca89/distrobox/blob/main/docs/compatibility.md
 EOF
+}
+
+# Print list of compatible images to stdou, caching locally in a file.
+# Arguments:
+#   None
+# Outputs:
+#   print usage with examples.
+show_compatibility() {
+	if [ ! -e "${HOME}/.cache/distrobox-compatibility-${version}" ]; then
+		mkdir -p "${HOME}/.cache"
+
+		# If we don't have a cache file, we need connectivity. Ensure we have
+		# one and return error if not.
+		if ! curl -s "https://github.com" > /dev/null; then
+			printf >&2 "ERROR: no cache file and no connectivity found, cannot retrieve compatibility list.\n"
+			exit 1
+		fi
+		# We want to download the correspondent version of the compatibility table and extract a list from it.
+		# Always use the docs as source of truth for this.
+		curl -s \
+			"https://raw.githubusercontent.com/89luca89/distrobox/${version}/docs/compatibility.md" |
+			grep -A200 "^## Containers Distros" |
+			grep '|' |
+			cut -d '|' -f 4 |
+			sed 's|<br>|\n|g' |
+			tr -d ' ' |
+			sort -u |
+			tail -n+4 > "${HOME}/.cache/distrobox-compatibility-${version}"
+	fi
+	cat "${HOME}/.cache/distrobox-compatibility-${version}"
 }
 
 # Parse arguments
@@ -183,7 +215,7 @@ while :; do
 			;;
 		--no-entry)
 			shift
-			container_entry=0
+			container_generate_entry=0
 			;;
 		-d | --dry-run)
 			shift
@@ -196,6 +228,10 @@ while :; do
 		-I | --init)
 			shift
 			init=1
+			;;
+		-C | --compatibility)
+			show_compatibility
+			exit 0
 			;;
 		-i | --image)
 			if [ -n "$2" ]; then
@@ -256,7 +292,7 @@ while :; do
 			;;
 		--pre-init-hooks)
 			if [ -n "$2" ]; then
-				container_pre_init_hook="--pre-init-hooks \"${2}\""
+				container_pre_init_hook="${2}"
 				shift
 				shift
 			fi
@@ -301,7 +337,7 @@ fi
 # toolbx one. This will avoid problems when using both toolbx and distrobox on
 # the same system.
 if [ -z "${container_name}" ] && [ "${container_image}" = "${container_image_default}" ]; then
-	container_name="my-distrobox"
+	container_name="${container_name_default}"
 fi
 
 # If no container_name is declared, we build our container name starting from the
@@ -587,13 +623,16 @@ generate_command() {
 	# inside the container is moved to distrobox-enter, in the start phase.
 	# This is done to make init, export and host-exec location independent from
 	# the host, and easier to upgrade.
-	result_command="${result_command} ${container_image}
-		/usr/bin/entrypoint -v --name \"${container_user_name}\"
+	#
+	# We set the entrypoint _before_ running the container image so that
+	# we can override any user provided entrypoint if need be
+	result_command="${result_command} --entrypoint /usr/bin/entrypoint
+	${container_image} -v --name \"${container_user_name}\"
 		--user ${container_user_uid}
 		--group ${container_user_gid}
 		--home \"${container_user_custom_home:-"${container_user_home}"}\"
 		--init \"${init}\"
-		${container_pre_init_hook}
+		--pre-init-hooks \"${container_pre_init_hook}\"
 		-- '${container_init_hook}'
 		"
 	# use container_user_custom_home if defined, else fallback to normal home.
@@ -689,7 +728,7 @@ if eval ${cmd} > /dev/null; then
 
 	# We've created the box, let's also create the entry
 	if [ "${rootful}" -eq 0 ]; then
-		if [ "${container_entry}" -ne 0 ]; then
+		if [ "${container_generate_entry}" -ne 0 ]; then
 			"$(dirname "$(realpath "${0}")")/distrobox-generate-entry" "${container_name}"
 		fi
 	fi

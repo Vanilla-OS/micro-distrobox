@@ -25,8 +25,6 @@
 #	DISTROBOX_ENTER_PATH
 #	DISTROBOX_HOST_HOME
 
-trap '[ "$?" -ne 0 ] && printf "\nAn error occurred\n"' EXIT
-
 # Defaults
 dest_path=""
 export_action=""
@@ -43,7 +41,7 @@ host_home="${DISTROBOX_HOST_HOME:-"${HOME}"}"
 is_sudo=""
 rootful=""
 verbose=0
-version="1.4.1"
+version="1.4.2.1"
 
 # We depend on some commands, let's be sure we have them
 base_dependencies="basename grep sed find"
@@ -412,7 +410,7 @@ export_application() {
 
 		# we wanto to export the application's icons
 		mkdir -p "${icon_home_directory}"
-		cp -r "${icon_file}" "${icon_home_directory}"
+		cp -r "$(realpath "${icon_file}")" "${icon_home_directory}"
 	done
 
 	# create desktop files for the distrobox
