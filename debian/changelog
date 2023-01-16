@@ -1,5 +1,5 @@
-micro-distrobox (1.4.2.1) kinetic; urgency=low
+micro-distrobox (1.4.2.1-1) kinetic; urgency=low
 
-  * Update with upstream changes
+  * Workaround storage configuration mismatch
 
  -- Mirko Brombin <send@mirko.pm>  Mon, 02 Jan 2023 11:48:14 -0500
