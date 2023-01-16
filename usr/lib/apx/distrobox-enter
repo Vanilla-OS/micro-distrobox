@@ -42,7 +42,7 @@ fi
 container_command=""
 container_image_default="registry.fedoraproject.org/fedora-toolbox:36"
 container_manager="autodetect"
-container_manager_additional_flags="--storage-driver=vfs"
+container_manager_additional_flags=""
 container_name=""
 container_name_default="my-distrobox"
 non_interactive=0
@@ -396,7 +396,7 @@ fi
 
 # Now inspect the container we're working with.
 container_status="unknown"
-eval "$(${container_manager} inspect --type container "${container_name}" ${container_manager_additional_flags} --format \
+eval "$(${container_manager} inspect --type container "${container_name}" --format \
 	'container_status={{.State.Status}};
 	{{range .Config.Env}}{{if slice . 0 5 | eq "HOME="}}container_home={{slice . 5 | printf "%q"}};{{end}}{{end}}
 	{{range .Config.Env}}{{if slice . 0 5 | eq "PATH="}}container_path={{slice . 5 | printf "%q"}}{{end}}{{end}}')"
