@@ -1,3 +1,9 @@
+micro-distrobox (1.4.2.1-3) lunar; urgency=low
+
+  * Workaround storage configuration mismatch
+
+ -- Mirko Brombin <send@mirko.pm>  Mon, 02 Jan 2023 11:48:14 -0500
+
 micro-distrobox (1.4.2.1-2) kinetic; urgency=low
 
   * Workaround storage configuration mismatch
