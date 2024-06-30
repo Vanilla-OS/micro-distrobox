@@ -1,3 +1,9 @@
+micro-distrobox (1.7.2.1) unstable; urgency=low
+
+  * Update distrobox to 1.7.2.1
+
+ -- Mirko Brombin <send@mirko.pm>  Sun, 30 Jun 2024 11:48:14 -0500
+
 micro-distrobox (1.4.2.1) unstable; urgency=low
 
   * Workaround storage configuration mismatch

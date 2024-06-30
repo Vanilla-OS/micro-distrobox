@@ -22,20 +22,28 @@
 host_command=""
 non_interactive=0
 # If we're in a non-interactive shell, let's act accordingly
-if [ ! -t 1 ]; then
+if [ ! -t 1 ] ||
+	! tty > /dev/null 2>&1; then
 	non_interactive=1
 fi
 distrobox_host_exec_default_command="${SHELL:-/bin/sh}"
-host_spawn_version="1.2.1"
+host_spawn_version="1.5.0"
+download_command=""
+sudo_command=""
 verbose=0
-version="1.4.2.1"
+version="1.7.2.1"
 
-# Print usage to stdout.
+# show_help will print usage to stdout.
 # Arguments:
+#   None
+# Expected global variables:
+#   version: distrobox version
+# Expected env variables:
 #   None
 # Outputs:
 #   print usage with examples.
-show_help() {
+show_help()
+{
 	cat << EOF
 distrobox version: ${version}
 
@@ -53,7 +61,7 @@ Options:
 	--help/-h:		show this message
 	--verbose/-v:		show more verbosity
 	--version/-V:		show version
-    --yes/-Y:      Automatically answer yes to prompt:
+	--yes/-Y:		Automatically answer yes to prompt:
                                 host-spawn will be installed on the guest system
                                 if host-spawn is not detected.
                                 This behaviour is default when running in a non-interactive shell.
@@ -80,6 +88,7 @@ if [ -z "${host_command}" ]; then
 				;;
 			-V | --version)
 				printf "distrobox: %s\n" "${version}"
+				printf "host-spawn: %s\n" "${host_spawn_version}"
 				exit 0
 				;;
 			-Y | --yes)
@@ -113,7 +122,7 @@ if [ "${verbose}" -ne 0 ]; then
 fi
 
 # Check we're running inside a container and not on the host
-if [ ! -f /run/.containerenv ] && [ ! -f /.dockerenv ]; then
+if [ ! -f /run/.containerenv ] && [ ! -f /.dockerenv ] && [ -z "${container:-}" ]; then
 	printf >&2 "You must run %s inside a container!\n" " $(basename "$0")"
 	exit 126
 fi
@@ -122,9 +131,24 @@ if [ -z "${host_command}" ]; then
 	host_command="${distrobox_host_exec_default_command}"
 fi
 
+if [ "$(id -ru)" -ne 0 ]; then
+	if command -v sudo 2> /dev/null > /dev/null; then
+		sudo_command="sudo"
+	else
+		sudo_command="su -l -c"
+	fi
+fi
+
+if  command -v curl > /dev/null 2>&1; then
+	download_command="curl -sLo"
+elif  command -v wget > /dev/null 2>&1; then
+	download_command="wget -qO"
+fi
+
 # Setup host-spawn as a way to execute commands back on the host
-if  ! command -v host-spawn > /dev/null ||
-	[ "$(host-spawn --version)" != "${host_spawn_version}" ]; then
+if ! command -v host-spawn > /dev/null ||
+	[ "$(printf "%s\n%s\n" "${host_spawn_version}" "$(host-spawn --version)" |
+		sort -V | head -n 1)" != "${host_spawn_version}" ]; then
 
 	# if non-interactive flag flag hasn't been set
 	if [ "${non_interactive}" -eq 0 ]; then
@@ -140,16 +164,15 @@ if  ! command -v host-spawn > /dev/null ||
 	case "${response}" in
 		y | Y | Yes | yes | YES)
 			# Download matching version with current distrobox
-			if ! curl -L \
-				"https://github.com/1player/host-spawn/releases/download/${host_spawn_version}/host-spawn-$(uname -m)" \
-				-o /tmp/host-spawn; then
+			if ! ${download_command} /tmp/host-spawn \
+				"https://github.com/1player/host-spawn/releases/download/${host_spawn_version}/host-spawn-$(uname -m)"; then
 
 				printf "Error: Cannot download host-spawn\n"
 				exit 1
 			fi
 			if [ -e /tmp/host-spawn ]; then
-				sudo mv /tmp/host-spawn /usr/bin/
-				sudo chmod +x /usr/bin/host-spawn
+				${sudo_command} sh -c "mv /tmp/host-spawn /usr/bin/"
+				${sudo_command} sh -c "chmod +x /usr/bin/host-spawn"
 			fi
 			;;
 		n | N | No | no | NO)
@@ -165,6 +188,14 @@ if  ! command -v host-spawn > /dev/null ||
 
 fi
 
+# This makes host-spawn work on initful containers, where the dbus session is
+# separate from the host, we point the dbus session straight to the host's socket
+# in order to talk with the org.freedesktop.Flatpak.Development.HostCommand on the host
+[ -z "${XDG_RUNTIME_DIR:-}" ] && XDG_RUNTIME_DIR="/run/user/$(id -ru)"
+[ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ] && DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$(id -ru)/bus"
+XDG_RUNTIME_DIR="/run/host/${XDG_RUNTIME_DIR}"
+DBUS_SESSION_BUS_ADDRESS="unix:path=/run/host/$(echo "${DBUS_SESSION_BUS_ADDRESS}" | cut -d '=' -f2-)"
+
 ###
 # This workaround is needed because of a bug in gio (used by xdg-open) where
 # a race condition happens when allocating a pty, leading to the command
@@ -176,15 +207,17 @@ fi
 # As an (ugly) workaround, we will not allocate a pty for those commands.
 ###
 # Also, we don't initialize a pty, if we're not in a tty.
-if  [ "$(basename "${host_command}")" = "xdg-open" ] ||
+if [ "$(basename "${host_command}")" = "xdg-open" ] ||
 	[ "$(basename "${host_command}")" = "gio" ] ||
-	[ ! -t 1 ]; then
+	[ "$(basename "${host_command}")" = "flatpak" ] ||
+	[ ! -t 1 ] ||
+	! tty > /dev/null 2>&1; then
 
 	host-spawn --no-pty "${host_command}" "$@"
 	# Exit here, we don't continue execution
 	exit $?
 fi
 
-host-spawn  "${host_command}" "$@"
+host-spawn "${host_command}" "$@"
 # Exit here, we don't continue execution
-exit  $?
+exit $?

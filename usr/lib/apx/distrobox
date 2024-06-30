@@ -22,27 +22,34 @@
 set -o errexit
 set -o nounset
 
-version="1.4.2.1"
+version="1.7.2.1"
 
-# Print usage to stdout.
+# show_help will print usage to stdout.
 # Arguments:
+#   None
+# Expected global variables:
+#   version: distrobox version
+# Expected env variables:
 #   None
 # Outputs:
 #   print usage with examples.
-show_help() {
+show_help()
+{
 	cat << EOF
 distrobox version: ${version}
 
 Choose one of the available commands:
+	assemble
 	create
 	enter
-	list
+	list | ls
 	rm
 	stop
 	upgrade
 	ephemeral
 	generate-entry
 	version
+	help
 EOF
 }
 
@@ -58,13 +65,16 @@ shift
 # Simple wrapper to the distrobox utilities.
 # We just detect the 1st argument and launch the matching distrobox utility.
 case "${distrobox_command}" in
+	assemble)
+		"${distrobox_path}"/distrobox-assemble "$@"
+		;;
 	create)
 		"${distrobox_path}"/distrobox-create "$@"
 		;;
 	enter)
 		"${distrobox_path}"/distrobox-enter "$@"
 		;;
-	list)
+	ls | list)
 		"${distrobox_path}"/distrobox-list "$@"
 		;;
 	stop)

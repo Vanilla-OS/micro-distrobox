@@ -19,22 +19,52 @@
 # along with distrobox; if not, see <http://www.gnu.org/licenses/>.
 
 # POSIX
+# Optional env variables:
+#	DBX_CONTAINER_MANAGER
+#	DBX_VERBOSE
 
+# Despite of running this script via SUDO/DOAS being not supported (the
+# script itself will call the appropriate tool when necessary), we still want
+# to allow people to run it as root, logged in in a shell, and create rootful
+# containers.
+#
+# SUDO_USER is a variable set by SUDO and can be used to check whether the script was called by it. Same thing for DOAS_USER, set by DOAS.
+if {
+	[ -n "${SUDO_USER}" ] || [ -n "${DOAS_USER}" ]
+} && [ "$(id -ru)" -eq 0 ]; then
+	printf >&2 "Running %s via SUDO/DOAS is not supported. Instead, please try running:\n" "$(basename "${0}")"
+	printf >&2 "  %s --root %s\n" "$(basename "${0}")" "$*"
+	exit 1
+fi
+
+# If the user runs this script as root in a login shell, set rootful=1.
+# There's no need for them to pass the --root flag option in such cases.
+[ "$(id -ru)" -eq 0 ] && rootful=1 || rootful=0
+extra_flags=""
 all=0
 container_manager="autodetect"
 container_name_default="my-distrobox"
 delete=0
 icon="auto"
-icon_default="${HOME}/.local/share/icons/terminal-distrobox-icon.png"
+icon_default="${HOME}/.local/share/icons/terminal-distrobox-icon.svg"
 verbose=0
-version="1.4.2.1"
+version="1.7.2.1"
 
 # Source configuration files, this is done in an hierarchy so local files have
 # priority over system defaults
 # leave priority to environment variables.
+#
+# On NixOS, for the distrobox derivation to pick up a static config file shipped
+# by the package maintainer the path must be relative to the script itself.
+self_dir="$(dirname "$(realpath "$0")")"
+nix_config_file="${self_dir}/../share/distrobox/distrobox.conf"
+
 config_files="
+	${nix_config_file}
 	/usr/share/distrobox/distrobox.conf
+	/usr/share/defaults/distrobox/distrobox.conf
 	/usr/etc/distrobox/distrobox.conf
+	/usr/local/share/distrobox/distrobox.conf
 	/etc/distrobox/distrobox.conf
 	${XDG_CONFIG_HOME:-"${HOME}/.config"}/distrobox/distrobox.conf
 	${HOME}/.distroboxrc
@@ -43,17 +73,27 @@ for config_file in ${config_files}; do
 	# Shellcheck will give error for sourcing a variable file as it cannot follow
 	# it. We don't care so let's disable this linting for now.
 	# shellcheck disable=SC1090
-	[ -e "${config_file}" ] && . "${config_file}"
+	[ -e "${config_file}" ] && . "$(realpath "${config_file}")"
 done
-[ -n "${DBX_CONTAINER_MANAGER}" ] && container_manager="${DBX_CONTAINER_MANAGER}"
-[ -n "${DBX_CONTAINER_NAME}" ] && container_name="${DBX_CONTAINER_NAME}"
 
-# Print usage to stdout.
+[ -n "${DBX_CONTAINER_MANAGER}" ] && container_manager="${DBX_CONTAINER_MANAGER}"
+[ -n "${DBX_VERBOSE}" ] && verbose="${DBX_VERBOSE}"
+
+# Fixup variable=[true|false], in case we find it in the config file(s)
+[ "${verbose}" = "true" ] && verbose=1
+[ "${verbose}" = "false" ] && verbose=0
+
+# show_help will print usage to stdout.
 # Arguments:
+#   None
+# Expected global variables:
+#   version: distrobox version
+# Expected env variables:
 #   None
 # Outputs:
 #   print usage with examples.
-show_help() {
+show_help()
+{
 	cat << EOF
 distrobox version: ${version}
 
@@ -67,6 +107,7 @@ Options:
 	--all/-a:		perform for all distroboxes
 	--delete/-d:		delete the entry
 	--icon/-i:		specify a custom icon [/path/to/icon] (default auto)
+	--root/-r:		perform on rootful distroboxes
 	--verbose/-v:		show more verbosity
 	--version/-V:		show version
 EOF
@@ -102,6 +143,10 @@ while :; do
 				shift
 				shift
 			fi
+			;;
+		-r | --root)
+			shift
+			rootful=1
 			;;
 		--) # End of all options.
 			shift
@@ -151,37 +196,50 @@ fi
 # If we delete, just ask confirmation and exit.
 if [ "${delete}" -ne 0 ]; then
 	rm -f "${HOME}/.local/share/applications/${container_name}.desktop"
-	printf "%s\n" "${container_name}"
 	exit
 fi
 
-if  ! command -v curl > /dev/null && ! command -v wget > /dev/null; then
+if ! command -v curl > /dev/null && ! command -v wget > /dev/null; then
 	printf >&2 "Icon generation depends on either curl or wget\n"
 	printf >&2 "Fallbacking to default icon.\n"
 	download="null"
 fi
 
-if  command -v curl > /dev/null 2>&1; then
+if command -v curl > /dev/null 2>&1; then
 	download="curl -sLo"
-elif  command -v wget > /dev/null 2>&1; then
+elif command -v wget > /dev/null 2>&1; then
 	download="wget -qO"
 fi
 
 # We depend on a container manager let's be sure we have it
-# First we use podman, else docker
+# First we use podman, else docker, else lilipod
 case "${container_manager}" in
 	autodetect)
 		if command -v podman > /dev/null; then
 			container_manager="podman"
 			container_manager_cp_command="podman cp"
+		elif command -v podman-launcher > /dev/null; then
+			container_manager="podman-launcher"
+			container_manager_cp_command="podman-launcher cp"
 		elif command -v docker > /dev/null; then
 			container_manager="docker"
 			container_manager_cp_command="docker cp -L"
+		elif command -v lilipod > /dev/null; then
+			container_manager="lilipod"
+			container_manager_cp_command="lilipod cp"
 		fi
 		;;
 	podman)
 		container_manager="podman"
 		container_manager_cp_command="podman cp"
+		;;
+	podman-launcher)
+		container_manager="podman-launcher"
+		container_manager_cp_command="podman-launcher cp"
+		;;
+	lilipod)
+		container_manager="lilipod"
+		container_manager_cp_command="lilipod cp"
 		;;
 	docker)
 		container_manager="docker"
@@ -189,15 +247,15 @@ case "${container_manager}" in
 		;;
 	*)
 		printf >&2 "Invalid input %s.\n" "${container_manager}"
-		printf >&2 "The available choices are: 'autodetect', 'podman', 'docker'\n"
+		printf >&2 "The available choices are: 'autodetect', 'podman', 'docker', 'lilipod'\n"
 		;;
 esac
 
 # Be sure we have a container manager to work with.
 if ! command -v "${container_manager}" > /dev/null; then
-	# Error: we need at least one between docker or podman.
+	# Error: we need at least one between docker, podman or lilipod.
 	printf >&2 "Missing dependency: we need a container manager.\n"
-	printf >&2 "Please install one of podman or docker.\n"
+	printf >&2 "Please install one of podman,  docker or lilipod.\n"
 	printf >&2 "You can follow the documentation on:\n"
 	printf >&2 "\tman distrobox-compatibility\n"
 	printf >&2 "or:\n"
@@ -205,9 +263,17 @@ if ! command -v "${container_manager}" > /dev/null; then
 	exit 127
 fi
 
-# add  verbose if -v is specified
+# add verbose if -v is specified
 if [ "${verbose}" -ne 0 ]; then
 	container_manager="${container_manager} --log-level debug"
+	container_manager_cp_command="${container_manager_cp_command} --log-level debug"
+fi
+
+# prepend sudo (or the specified sudo program) if we want our container manager to be rootful
+if [ "${rootful}" -ne 0 ]; then
+	extra_flags="${extra_flags} --root"
+	container_manager="${distrobox_sudo_program:-"sudo"} ${container_manager}"
+	container_manager_cp_command="${distrobox_sudo_program:-"sudo"} ${container_manager_cp_command}"
 fi
 
 if ! ${container_manager} inspect --type container "${container_name}" > /dev/null; then
@@ -225,24 +291,26 @@ entry_name="$(echo "${container_name}" | cut -c1 | tr "[:lower:]" "[:upper:]")$(
 if [ "${icon}" = "auto" ]; then
 	# Set icon to the generic terminal as a fallback.
 	icon="${icon_default}"
-	# This is a NON comprehensive list of logos of the most popular distirbutions. If you find logos for
+	# This is a NON comprehensive list of logos of the most popular distributions. If you find logos for
 	# other supported distros, add it here.
 	DISTRO_ICON_MAP="
-		alma:https://upload.wikimedia.org/wikipedia/commons/e/ec/AlmaLinux_Icon_Logo.png
-		alpine:https://d1q6f0aelx0por.cloudfront.net/product-logos/library-alpine-logo.png
-		arch:https://upload.wikimedia.org/wikipedia/commons/thumb/b/bb/Archlogo900.png/640px-Archlogo900.png
-		centos:https://upload.wikimedia.org/wikipedia/commons/6/63/CentOS_color_logo.svg
-		clear--os:https://d1q6f0aelx0por.cloudfront.net/product-logos/library-clearlinux-logo.png
-		debian:https://free-astro.org/images/0/04/Debian_logo.png
-		fedora:https://upload.wikimedia.org/wikipedia/commons/4/41/Fedora_icon_%282021%29.svg
-		gentoo:https://upload.wikimedia.org/wikipedia/commons/e/e2/Logo-gentoo.png
-		opensuse-leap:https://en.opensuse.org/images/4/44/Button-filled-colour.png
-		opensuse-tumbleweed:https://en.opensuse.org/images/4/44/Button-filled-colour.png
-		rhel:https://avatars.githubusercontent.com/u/12718395?.png
-		rocky:https://raw.githubusercontent.com/rocky-linux/rocky-logos/r9/pixmaps/fedora-logo-sprite.png
-		slackware:https://distrowatch.com/images/yvzhuwbpy/slackware.png
-		ubuntu:https://upload.wikimedia.org/wikipedia/commons/a/ab/Logo-ubuntu_cof-orange-hex.svg
-		void:https://voidlinux.org/assets/img/void_bg.png
+		alma:https://raw.githubusercontent.com/89luca89/distrobox/main/docs/assets/png/distros/alma-distrobox.png
+		alpine:https://raw.githubusercontent.com/89luca89/distrobox/main/docs/assets/png/distros/alpine-distrobox.png
+		arch:https://raw.githubusercontent.com/89luca89/distrobox/main/docs/assets/png/distros/arch-distrobox.png
+		centos:https://raw.githubusercontent.com/89luca89/distrobox/main/docs/assets/png/distros/centos-distrobox.png
+		clear--os:https://raw.githubusercontent.com/89luca89/distrobox/main/docs/assets/png/distros/clear-distrobox.png
+		debian:https://raw.githubusercontent.com/89luca89/distrobox/main/docs/assets/png/distros/debian-distrobox.png
+		deepin:https://raw.githubusercontent.com/89luca89/distrobox/main/docs/assets/png/distros/deepin-distrobox.png
+		fedora:https://raw.githubusercontent.com/89luca89/distrobox/main/docs/assets/png/distros/fedora-distrobox.png
+		gentoo:https://raw.githubusercontent.com/89luca89/distrobox/main/docs/assets/png/distros/gentoo-distrobox.png
+		kdeneon:https://raw.githubusercontent.com/89luca89/distrobox/main/docs/assets/png/distros/kdeneon-distrobox.png
+		opensuse-leap:https://raw.githubusercontent.com/89luca89/distrobox/main/docs/assets/png/distros/opensuse-distrobox.png
+		opensuse-tumbleweed:https://raw.githubusercontent.com/89luca89/distrobox/main/docs/assets/png/distros/opensuse-distrobox.png
+		rhel:https://raw.githubusercontent.com/89luca89/distrobox/main/docs/assets/png/distros/redhat-distrobox.png
+		rocky:https://raw.githubusercontent.com/89luca89/distrobox/main/docs/assets/png/distros/rocky-distrobox.png
+		ubuntu:https://raw.githubusercontent.com/89luca89/distrobox/main/docs/assets/png/distros/ubuntu-distrobox.png
+		vanilla:https://raw.githubusercontent.com/89luca89/distrobox/main/docs/assets/png/distros/vanilla-distrobox.png
+		void:https://raw.githubusercontent.com/89luca89/distrobox/main/docs/assets/png/distros/void-distrobox.png
 	"
 	# Try to detect container's distribution by using /etc/os-release
 	${container_manager_cp_command} "${container_name}":/etc/os-release /tmp/"${container_name}".os-release
@@ -251,7 +319,12 @@ if [ "${icon}" = "auto" ]; then
 		sed "s|linux||g" |
 		tr -d ' ' |
 		tr -d '"')"
-	rm -f /tmp/"${container_name}".os-release
+
+	if [ "${rootful}" -ne 0 ]; then
+		${distrobox_sudo_program:-"sudo"} rm -f /tmp/"${container_name}".os-release
+	else
+		rm -f /tmp/"${container_name}".os-release
+	fi
 
 	icon_url="$(echo "${DISTRO_ICON_MAP}" | grep "${container_distro}:" | cut -d':' -f2-)"
 	if [ -n "${icon_url}" ] && [ "${download}" != "null" ]; then
@@ -274,8 +347,8 @@ cat << EOF > "${HOME}/.local/share/applications/${container_name}.desktop"
 Name=${entry_name}
 GenericName=Terminal entering ${entry_name}
 Comment=Terminal entering ${entry_name}
-Category=Distrobox;System;Utility"
-Exec=${distrobox_path}/distrobox enter ${container_name}
+Categories=Distrobox;System;Utility
+Exec=${distrobox_path}/distrobox enter ${extra_flags} ${container_name}
 Icon=${icon}
 Keywords=distrobox;
 NoDisplay=false
@@ -283,5 +356,3 @@ Terminal=true
 TryExec=${distrobox_path}/distrobox
 Type=Application
 EOF
-
-printf "%s\n" "${container_name}"
